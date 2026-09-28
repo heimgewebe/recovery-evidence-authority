@@ -11,6 +11,10 @@ on:
         description: Base64 of the exact redacted producer receipt bound by the provenance
         required: true
         type: string
+      producer_signature_b64:
+        description: Base64 of the OpenSSH sshsig signature over the exact producer receipt
+        required: true
+        type: string
       recovery_contract_b64:
         description: Base64 of the exact provisioned Heim-PC recovery contract bytes
         required: true
@@ -39,9 +43,11 @@ jobs:
         env:
           PROVENANCE_B64: ${{ inputs.provenance_b64 }}
           PRODUCER_RECEIPT_B64: ${{ inputs.producer_receipt_b64 }}
+          PRODUCER_SIGNATURE_B64: ${{ inputs.producer_signature_b64 }}
           RECOVERY_CONTRACT_B64: ${{ inputs.recovery_contract_b64 }}
           PROVENANCE: ${{ runner.temp }}/recovery-provenance.json
           PRODUCER_RECEIPT: ${{ runner.temp }}/producer-receipt.json
+          PRODUCER_SIGNATURE: ${{ runner.temp }}/producer-receipt.json.sig
           RECOVERY_CONTRACT: ${{ runner.temp }}/recovery-contract.json
           PREDICATE: ${{ runner.temp }}/recovery-attestation-predicate.json
         run: |
@@ -53,8 +59,9 @@ jobs:
 
           printf '%s' "$PROVENANCE_B64" | base64 --decode > "$PROVENANCE"
           printf '%s' "$PRODUCER_RECEIPT_B64" | base64 --decode > "$PRODUCER_RECEIPT"
+          printf '%s' "$PRODUCER_SIGNATURE_B64" | base64 --decode > "$PRODUCER_SIGNATURE"
           printf '%s' "$RECOVERY_CONTRACT_B64" | base64 --decode > "$RECOVERY_CONTRACT"
-          chmod 0600 "$PROVENANCE" "$PRODUCER_RECEIPT" "$RECOVERY_CONTRACT"
+          chmod 0600 "$PROVENANCE" "$PRODUCER_RECEIPT" "$PRODUCER_SIGNATURE" "$RECOVERY_CONTRACT"
 
           HEIM_PC_MAIN="$(git ls-remote https://github.com/heimgewebe/heim-pc.git refs/heads/main | cut -f1)"
           printf '%s\n' "$HEIM_PC_MAIN" | grep -Eq '^[0-9a-f]{40}$'

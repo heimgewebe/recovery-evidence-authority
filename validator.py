@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +24,9 @@ PROVENANCE_KINDS = {
 }
 RECEIPT_KIND = "heim_pc.external_recovery_producer_receipt.v1"
 ATTESTATION_KIND = "heim_pc.nixos_recovery_provenance_attestation"
+SSH_KEYGEN = "/usr/bin/ssh-keygen"
+PRODUCER_SIGNER_IDENTITY = "heimberry-recovery-producer"
+PRODUCER_SIGNATURE_NAMESPACE = "heim-pc-recovery-evidence"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -63,6 +67,51 @@ def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tupl
     if not isinstance(value, dict):
         raise ValidationError(f"{label} must be a JSON object")
     return value, payload
+
+
+def verify_producer_signature(
+    receipt_bytes: bytes,
+    signature_path: Path,
+    allowed_signers_path: Path,
+) -> dict[str, str]:
+    """Verify the exact producer-receipt bytes against the pinned external signer."""
+    signature_bytes = signature_path.read_bytes()
+    if not signature_bytes or len(signature_bytes) > 64 * 1024:
+        raise ValidationError("producer signature size is outside the bounded contract")
+    allowed_signers_bytes = allowed_signers_path.read_bytes()
+    if not allowed_signers_bytes or len(allowed_signers_bytes) > 64 * 1024:
+        raise ValidationError("allowed signers file is outside the bounded contract")
+    argv = [
+        SSH_KEYGEN,
+        "-Y",
+        "verify",
+        "-f",
+        str(allowed_signers_path),
+        "-I",
+        PRODUCER_SIGNER_IDENTITY,
+        "-n",
+        PRODUCER_SIGNATURE_NAMESPACE,
+        "-s",
+        str(signature_path),
+    ]
+    try:
+        result = subprocess.run(
+            argv,
+            input=receipt_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+        )
+    except OSError as exc:
+        raise ValidationError("producer signature verifier could not execute") from exc
+    if result.returncode != 0:
+        raise ValidationError("producer receipt signature verification failed")
+    return {
+        "producer_signature_sha256": sha256_bytes(signature_bytes),
+        "allowed_signers_sha256": sha256_bytes(allowed_signers_bytes),
+        "verifier_argv_sha256": sha256_json(argv),
+    }
 
 
 def require_exact_keys(value: dict[str, Any], keys: set[str], label: str) -> None:
@@ -604,6 +653,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--provenance", type=Path, required=True)
     parser.add_argument("--producer-receipt", type=Path, required=True)
+    parser.add_argument("--producer-signature", type=Path, required=True)
+    parser.add_argument("--allowed-signers", type=Path, required=True)
     parser.add_argument("--recovery-contract", type=Path, required=True)
     parser.add_argument("--authority-revision", required=True)
     parser.add_argument("--expected-heim-pc-revision", required=True)
@@ -612,6 +663,11 @@ def main() -> int:
 
     provenance, provenance_bytes = load_json_bytes(args.provenance, "provenance")
     receipt, receipt_bytes = load_json_bytes(args.producer_receipt, "producer receipt")
+    verify_producer_signature(
+        receipt_bytes,
+        args.producer_signature,
+        args.allowed_signers,
+    )
     contract, contract_bytes = load_json_bytes(args.recovery_contract, "recovery contract")
     predicate = validate_subject(
         provenance,

@@ -271,3 +271,57 @@ def test_wrong_heim_pc_main_rejected():
             expected_heim_pc_revision="3" * 40,
             now=NOW,
         )
+
+
+def test_producer_signature_verifier_uses_exact_receipt_bytes(monkeypatch, tmp_path):
+    receipt_bytes = b'{"receipt":"exact"}\n'
+    signature = tmp_path / "receipt.sig"
+    signature.write_text("-----BEGIN SSH SIGNATURE-----\nfixture\n-----END SSH SIGNATURE-----\n")
+    allowed = tmp_path / "allowed_signers"
+    allowed.write_text(
+        "heimberry-recovery-producer ssh-ed25519 "
+        "AAAAC3NzaC1lZDI1NTE5AAAAIHW1P0IHun3CCzTA+ihKV2aExfpuoSt5s2Qo6v2yflpd\n"
+    )
+    observed = {}
+
+    def fake_run(argv, **kwargs):
+        observed["argv"] = argv
+        observed["input"] = kwargs["input"]
+        observed["env"] = kwargs["env"]
+        return validator.subprocess.CompletedProcess(argv, 0, b"Good signature\n", b"")
+
+    monkeypatch.setattr(validator.subprocess, "run", fake_run)
+    result = validator.verify_producer_signature(receipt_bytes, signature, allowed)
+    assert observed["input"] == receipt_bytes
+    assert observed["argv"] == [
+        "/usr/bin/ssh-keygen",
+        "-Y",
+        "verify",
+        "-f",
+        str(allowed),
+        "-I",
+        "heimberry-recovery-producer",
+        "-n",
+        "heim-pc-recovery-evidence",
+        "-s",
+        str(signature),
+    ]
+    assert observed["env"]["PATH"] == "/usr/bin:/bin"
+    assert result["producer_signature_sha256"] == hashlib.sha256(signature.read_bytes()).hexdigest()
+
+
+def test_producer_signature_verifier_fails_closed(monkeypatch, tmp_path):
+    signature = tmp_path / "receipt.sig"
+    signature.write_text("invalid-signature\n")
+    allowed = tmp_path / "allowed_signers"
+    allowed.write_text(
+        "heimberry-recovery-producer ssh-ed25519 "
+        "AAAAC3NzaC1lZDI1NTE5AAAAIHW1P0IHun3CCzTA+ihKV2aExfpuoSt5s2Qo6v2yflpd\n"
+    )
+
+    def fake_run(argv, **kwargs):
+        return validator.subprocess.CompletedProcess(argv, 255, b"", b"Signature verification failed")
+
+    monkeypatch.setattr(validator.subprocess, "run", fake_run)
+    with pytest.raises(validator.ValidationError, match="signature verification failed"):
+        validator.verify_producer_signature(b"receipt\n", signature, allowed)
