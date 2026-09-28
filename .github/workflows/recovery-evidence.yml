@@ -1,0 +1,99 @@
+name: recovery-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      provenance_b64:
+        description: Base64 of the exact redacted recovery provenance object to validate and attest
+        required: true
+        type: string
+      producer_receipt_b64:
+        description: Base64 of the exact redacted producer receipt bound by the provenance
+        required: true
+        type: string
+      recovery_contract_b64:
+        description: Base64 of the exact provisioned Heim-PC recovery contract bytes
+        required: true
+        type: string
+
+concurrency:
+  group: recovery-evidence-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate-attest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout exact authority source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Materialize and validate exact recovery subject
+        id: validate
+        env:
+          PROVENANCE_B64: ${{ inputs.provenance_b64 }}
+          PRODUCER_RECEIPT_B64: ${{ inputs.producer_receipt_b64 }}
+          RECOVERY_CONTRACT_B64: ${{ inputs.recovery_contract_b64 }}
+          PROVENANCE: ${{ runner.temp }}/recovery-provenance.json
+          PRODUCER_RECEIPT: ${{ runner.temp }}/producer-receipt.json
+          RECOVERY_CONTRACT: ${{ runner.temp }}/recovery-contract.json
+          PREDICATE: ${{ runner.temp }}/recovery-attestation-predicate.json
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "heimgewebe/recovery-evidence-authority"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+          printf '%s' "$PROVENANCE_B64" | base64 --decode > "$PROVENANCE"
+          printf '%s' "$PRODUCER_RECEIPT_B64" | base64 --decode > "$PRODUCER_RECEIPT"
+          printf '%s' "$RECOVERY_CONTRACT_B64" | base64 --decode > "$RECOVERY_CONTRACT"
+          chmod 0600 "$PROVENANCE" "$PRODUCER_RECEIPT" "$RECOVERY_CONTRACT"
+
+          HEIM_PC_MAIN="$(git ls-remote https://github.com/heimgewebe/heim-pc.git refs/heads/main | cut -f1)"
+          printf '%s\n' "$HEIM_PC_MAIN" | grep -Eq '^[0-9a-f]{40}$'
+
+          python3 validator.py             --provenance "$PROVENANCE"             --producer-receipt "$PRODUCER_RECEIPT"             --recovery-contract "$RECOVERY_CONTRACT"             --authority-revision "$GITHUB_SHA"             --expected-heim-pc-revision "$HEIM_PC_MAIN"             --write-predicate "$PREDICATE"
+
+          test -s "$PREDICATE"
+          EVIDENCE_ID="$(python3 -c 'import json,os; print(json.load(open(os.environ["PREDICATE"]))["evidence_id"])')"
+          PROVENANCE_KIND="$(python3 -c 'import json,os; print(json.load(open(os.environ["PREDICATE"]))["provenance_kind"])')"
+          {
+            echo "evidence_id=$EVIDENCE_ID"
+            echo "provenance_kind=$PROVENANCE_KIND"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest exact validated provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/recovery-provenance.json
+          predicate-type: https://heimgewebe.local/attestations/nixos-recovery-evidence/v1
+          predicate-path: ${{ runner.temp }}/recovery-attestation-predicate.json
+
+      - name: Collect exact Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          DEST: ${{ runner.temp }}/recovery-provenance.json.attestation.json
+        run: |
+          set -euo pipefail
+          test -n "$BUNDLE"
+          test -s "$BUNDLE"
+          cp -- "$BUNDLE" "$DEST"
+          test -s "$DEST"
+
+      - name: Upload compact attested evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: recovery-evidence-${{ steps.validate.outputs.evidence_id }}-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 3
+          path: |
+            ${{ runner.temp }}/recovery-provenance.json
+            ${{ runner.temp }}/recovery-provenance.json.attestation.json
