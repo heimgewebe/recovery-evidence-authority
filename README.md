@@ -15,7 +15,8 @@ The workflow rejects:
 - unprovisioned or drifted recovery contracts;
 - provenance not bound to current `heim-pc/main`;
 - producer/evidence-schema mismatches;
-- producer receipts whose bytes do not match the digest embedded in the provenance;\n- producer receipts without a valid `heim-pc-recovery-evidence` sshsig from the pinned heimberry key;
+- producer receipts whose bytes do not match the digest embedded in the provenance;
+- producer receipts without a valid `heim-pc-recovery-evidence` sshsig from the pinned heimberry key;
 - producer-specific facts that fail the fail-closed schema;
 - restore-test evidence whose signed base producer receipt, base receipt digest, or material-binding digest does not identify the same recovery material;
 - stale/future evidence outside the recovery contract freshness window;
