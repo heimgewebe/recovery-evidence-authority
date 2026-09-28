@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  security-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compile Python
+        run: python3 -m py_compile validator.py ci_selftest.py
+
+      - name: Run dependency-free security self-test
+        run: python3 ci_selftest.py
+
+      - name: Assert recovery workflow wiring
+        run: |
+          set -euo pipefail
+          grep -F -- '--producer-signature "$PRODUCER_SIGNATURE"' .github/workflows/recovery-evidence.yml
+          grep -F -- '--base-producer-receipt "$BASE_PRODUCER_RECEIPT"' .github/workflows/recovery-evidence.yml
+          grep -F -- '--allowed-signers "$GITHUB_WORKSPACE/keys/allowed_signers"' .github/workflows/recovery-evidence.yml
