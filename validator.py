@@ -162,7 +162,23 @@ def evidence_schema_for(evidence_id: str, restore: bool) -> str:
     return base + ".restore_test" if restore else base
 
 
+def require_material_binding(
+    facts: dict[str, Any],
+    identity: dict[str, Any],
+    label: str,
+) -> str:
+    binding = require_sha(facts.get("material_binding_sha256"), f"{label} material binding")
+    expected = sha256_json(identity)
+    if binding != expected:
+        raise ValidationError(f"{label} material binding mismatch")
+    return binding
+
+
 def validate_off_host_home_restore(facts: dict[str, Any], restore: bool) -> None:
+    identity = {
+        "backup_snapshot_sha256": facts.get("backup_snapshot_sha256"),
+        "critical_scope_sha256": facts.get("critical_scope_sha256"),
+    }
     if restore:
         require_exact_keys(
             facts,
@@ -174,6 +190,10 @@ def validate_off_host_home_restore(facts: dict[str, Any], restore: bool) -> None
                 "restored_inventory_sha256",
                 "inventories_match",
                 "network_required",
+                "backup_snapshot_sha256",
+                "critical_scope_sha256",
+                "material_binding_sha256",
+                "base_producer_receipt_sha256",
             },
             "off-host-home-restore restore facts",
         )
@@ -182,6 +202,9 @@ def validate_off_host_home_restore(facts: dict[str, Any], restore: bool) -> None
         require_bool(facts["restore_target_disposable"], True, "restore_target_disposable")
         require_sha(facts["source_inventory_sha256"], "source_inventory_sha256")
         require_sha(facts["restored_inventory_sha256"], "restored_inventory_sha256")
+        require_sha(facts["backup_snapshot_sha256"], "backup_snapshot_sha256")
+        require_sha(facts["critical_scope_sha256"], "critical_scope_sha256")
+        require_sha(facts["base_producer_receipt_sha256"], "base_producer_receipt_sha256")
         if facts["source_inventory_sha256"] != facts["restored_inventory_sha256"]:
             raise ValidationError("off-host restore inventory digests differ")
         require_bool(facts["inventories_match"], True, "inventories_match")
@@ -195,6 +218,7 @@ def validate_off_host_home_restore(facts: dict[str, Any], restore: bool) -> None
                 "critical_scope_sha256",
                 "backup_complete",
                 "target_independent",
+                "material_binding_sha256",
             },
             "off-host-home-restore facts",
         )
@@ -203,9 +227,14 @@ def validate_off_host_home_restore(facts: dict[str, Any], restore: bool) -> None
         require_sha(facts["critical_scope_sha256"], "critical_scope_sha256")
         require_bool(facts["backup_complete"], True, "backup_complete")
         require_bool(facts["target_independent"], True, "target_independent")
+    require_material_binding(facts, identity, "off-host-home-restore")
 
 
 def validate_offline_secret_recovery(facts: dict[str, Any], restore: bool) -> None:
+    identity = {
+        "recovery_material_sha256": facts.get("recovery_material_sha256"),
+        "recovery_material_size": facts.get("recovery_material_size"),
+    }
     if restore:
         require_exact_keys(
             facts,
@@ -215,6 +244,10 @@ def validate_offline_secret_recovery(facts: dict[str, Any], restore: bool) -> No
                 "secret_bytes_exposed",
                 "network_required",
                 "production_system_disk_required",
+                "recovery_material_sha256",
+                "recovery_material_size",
+                "material_binding_sha256",
+                "base_producer_receipt_sha256",
             },
             "offline-secret-recovery restore facts",
         )
@@ -222,11 +255,10 @@ def validate_offline_secret_recovery(facts: dict[str, Any], restore: bool) -> No
         require_bool(facts["recovery_test_passed"], True, "recovery_test_passed")
         require_bool(facts["secret_bytes_exposed"], False, "secret_bytes_exposed")
         require_bool(facts["network_required"], False, "network_required")
-        require_bool(
-            facts["production_system_disk_required"],
-            False,
-            "production_system_disk_required",
-        )
+        require_bool(facts["production_system_disk_required"], False, "production_system_disk_required")
+        require_sha(facts["recovery_material_sha256"], "recovery_material_sha256")
+        require_positive_int(facts["recovery_material_size"], "recovery_material_size")
+        require_sha(facts["base_producer_receipt_sha256"], "base_producer_receipt_sha256")
     else:
         require_exact_keys(
             facts,
@@ -236,6 +268,7 @@ def validate_offline_secret_recovery(facts: dict[str, Any], restore: bool) -> No
                 "recovery_material_sha256",
                 "recovery_material_size",
                 "production_system_disk_required",
+                "material_binding_sha256",
             },
             "offline-secret-recovery facts",
         )
@@ -243,14 +276,15 @@ def validate_offline_secret_recovery(facts: dict[str, Any], restore: bool) -> No
         require_bool(facts["secret_bytes_exposed"], False, "secret_bytes_exposed")
         require_sha(facts["recovery_material_sha256"], "recovery_material_sha256")
         require_positive_int(facts["recovery_material_size"], "recovery_material_size")
-        require_bool(
-            facts["production_system_disk_required"],
-            False,
-            "production_system_disk_required",
-        )
+        require_bool(facts["production_system_disk_required"], False, "production_system_disk_required")
+    require_material_binding(facts, identity, "offline-secret-recovery")
 
 
 def validate_luks_header(facts: dict[str, Any], restore: bool) -> None:
+    identity = {
+        "header_backup_sha256": facts.get("header_backup_sha256"),
+        "source_class": facts.get("source_class"),
+    }
     if restore:
         require_exact_keys(
             facts,
@@ -259,6 +293,10 @@ def validate_luks_header(facts: dict[str, Any], restore: bool) -> None:
                 "restore_target_disposable",
                 "network_required",
                 "secret_bytes_exposed",
+                "header_backup_sha256",
+                "source_class",
+                "material_binding_sha256",
+                "base_producer_receipt_sha256",
             },
             "luks-header restore facts",
         )
@@ -266,6 +304,8 @@ def validate_luks_header(facts: dict[str, Any], restore: bool) -> None:
         require_bool(facts["restore_target_disposable"], True, "restore_target_disposable")
         require_bool(facts["network_required"], False, "network_required")
         require_bool(facts["secret_bytes_exposed"], False, "secret_bytes_exposed")
+        require_sha(facts["header_backup_sha256"], "header_backup_sha256")
+        require_sha(facts["base_producer_receipt_sha256"], "base_producer_receipt_sha256")
     else:
         require_exact_keys(
             facts,
@@ -275,18 +315,21 @@ def validate_luks_header(facts: dict[str, Any], restore: bool) -> None:
                 "source_class",
                 "production_target_required",
                 "secret_bytes_exposed",
+                "material_binding_sha256",
             },
             "luks-header facts",
         )
         require_sha(facts["header_backup_sha256"], "header_backup_sha256")
         require_bool(facts["header_backup_present"], True, "header_backup_present")
-        if facts["source_class"] not in {"rehearsal", "recovery-medium", "disposable-target"}:
-            raise ValidationError("luks header source_class is invalid")
         require_bool(facts["production_target_required"], False, "production_target_required")
         require_bool(facts["secret_bytes_exposed"], False, "secret_bytes_exposed")
+    if facts["source_class"] not in {"rehearsal", "recovery-medium", "disposable-target"}:
+        raise ValidationError("luks header source_class is invalid")
+    require_material_binding(facts, identity, "luks-header-metadata-backup")
 
 
 def validate_bootable_media(facts: dict[str, Any], restore: bool) -> None:
+    identity = {"medium_identity_sha256": facts.get("medium_identity_sha256")}
     if restore:
         require_exact_keys(
             facts,
@@ -295,10 +338,14 @@ def validate_bootable_media(facts: dict[str, Any], restore: bool) -> None:
                 "network_required",
                 "production_system_disk_required",
                 "boot_stage",
+                "medium_identity_sha256",
+                "material_binding_sha256",
+                "base_producer_receipt_sha256",
             },
             "bootable recovery restore facts",
         )
         require_bool(facts["repeat_boot_passed"], True, "repeat_boot_passed")
+        require_sha(facts["base_producer_receipt_sha256"], "base_producer_receipt_sha256")
     else:
         require_exact_keys(
             facts,
@@ -308,22 +355,24 @@ def validate_bootable_media(facts: dict[str, Any], restore: bool) -> None:
                 "production_system_disk_required",
                 "boot_stage",
                 "medium_identity_sha256",
+                "material_binding_sha256",
             },
             "bootable recovery facts",
         )
         require_bool(facts["booted"], True, "booted")
-        require_sha(facts["medium_identity_sha256"], "medium_identity_sha256")
+    require_sha(facts["medium_identity_sha256"], "medium_identity_sha256")
     require_bool(facts["network_required"], False, "network_required")
-    require_bool(
-        facts["production_system_disk_required"],
-        False,
-        "production_system_disk_required",
-    )
+    require_bool(facts["production_system_disk_required"], False, "production_system_disk_required")
     if facts["boot_stage"] not in {"luks-prompt", "recovery-shell", "system"}:
         raise ValidationError("boot_stage is invalid")
+    require_material_binding(facts, identity, "bootable-recovery-media")
 
 
 def validate_offline_host_control(facts: dict[str, Any], restore: bool) -> None:
+    identity = {
+        "host_closure_sha256": facts.get("host_closure_sha256"),
+        "control_closure_sha256": facts.get("control_closure_sha256"),
+    }
     if restore:
         require_exact_keys(
             facts,
@@ -333,12 +382,15 @@ def validate_offline_host_control(facts: dict[str, Any], restore: bool) -> None:
                 "replacement_target_disposable",
                 "host_closure_sha256",
                 "control_closure_sha256",
+                "material_binding_sha256",
+                "base_producer_receipt_sha256",
             },
             "offline host/control restore facts",
         )
         require_bool(facts["offline_validation_passed"], True, "offline_validation_passed")
         require_bool(facts["network_required"], False, "network_required")
         require_bool(facts["replacement_target_disposable"], True, "replacement_target_disposable")
+        require_sha(facts["base_producer_receipt_sha256"], "base_producer_receipt_sha256")
     else:
         require_exact_keys(
             facts,
@@ -348,6 +400,7 @@ def validate_offline_host_control(facts: dict[str, Any], restore: bool) -> None:
                 "host_closure_sha256",
                 "control_closure_sha256",
                 "material_complete",
+                "material_binding_sha256",
             },
             "offline host/control facts",
         )
@@ -356,6 +409,7 @@ def validate_offline_host_control(facts: dict[str, Any], restore: bool) -> None:
         require_bool(facts["material_complete"], True, "material_complete")
     require_sha(facts["host_closure_sha256"], "host_closure_sha256")
     require_sha(facts["control_closure_sha256"], "control_closure_sha256")
+    require_material_binding(facts, identity, "offline-host-control-closure")
 
 
 def validate_network_off_boot(facts: dict[str, Any], restore: bool) -> None:
@@ -364,8 +418,11 @@ def validate_network_off_boot(facts: dict[str, Any], restore: bool) -> None:
         "replacement_or_isolated_target",
         "system_closure",
         "closure_manifest_sha256",
+        "material_binding_sha256",
         "repeat_reconstruction_passed" if restore else "booted",
     }
+    if restore:
+        keys.add("base_producer_receipt_sha256")
     require_exact_keys(facts, keys, "network-off reconstruction facts")
     require_bool(
         facts["repeat_reconstruction_passed" if restore else "booted"],
@@ -373,14 +430,20 @@ def validate_network_off_boot(facts: dict[str, Any], restore: bool) -> None:
         "reconstruction result",
     )
     require_bool(facts["network_required"], False, "network_required")
-    require_bool(
-        facts["replacement_or_isolated_target"],
-        True,
-        "replacement_or_isolated_target",
-    )
+    require_bool(facts["replacement_or_isolated_target"], True, "replacement_or_isolated_target")
     if not isinstance(facts["system_closure"], str) or STORE_RE.fullmatch(facts["system_closure"]) is None:
         raise ValidationError("system_closure is not a canonical Nix store path")
     require_sha(facts["closure_manifest_sha256"], "closure_manifest_sha256")
+    if restore:
+        require_sha(facts["base_producer_receipt_sha256"], "base_producer_receipt_sha256")
+    require_material_binding(
+        facts,
+        {
+            "system_closure": facts["system_closure"],
+            "closure_manifest_sha256": facts["closure_manifest_sha256"],
+        },
+        "network-off-reconstruction-boot",
+    )
 
 
 def validate_rpo_rto(facts: dict[str, Any], restore: bool) -> None:
@@ -406,6 +469,67 @@ FACT_VALIDATORS: dict[str, Callable[[dict[str, Any], bool], None]] = {
     "network-off-reconstruction-boot": validate_network_off_boot,
     "rpo-rto-record": validate_rpo_rto,
 }
+
+
+def validate_base_receipt_for_restore(
+    base_receipt: dict[str, Any],
+    base_receipt_bytes: bytes,
+    *,
+    evidence_id: str,
+    scope: str,
+    producer: str,
+    source_revision: str,
+    recovery_contract_sha256: str,
+    current: datetime,
+    freshness: dict[str, Any],
+) -> tuple[str, str]:
+    require_exact_keys(
+        base_receipt,
+        {
+            "schema_version",
+            "kind",
+            "producer",
+            "evidence_id",
+            "evidence_scope",
+            "evidence_schema",
+            "source_revision",
+            "recovery_contract_sha256",
+            "observed_at",
+            "result",
+            "facts",
+            "production_effects_authorized",
+        },
+        "base producer receipt",
+    )
+    if base_receipt["schema_version"] != 1 or base_receipt["kind"] != RECEIPT_KIND:
+        raise ValidationError("base producer receipt identity mismatch")
+    expected = {
+        "producer": producer,
+        "evidence_id": evidence_id,
+        "evidence_scope": scope,
+        "evidence_schema": evidence_schema_for(evidence_id, False),
+        "source_revision": source_revision,
+        "recovery_contract_sha256": recovery_contract_sha256,
+    }
+    for field, value in expected.items():
+        if base_receipt[field] != value:
+            raise ValidationError(f"base producer receipt {field} mismatch")
+    if base_receipt["result"] != "passed":
+        raise ValidationError("base producer receipt did not pass")
+    require_bool(
+        base_receipt["production_effects_authorized"],
+        False,
+        "base producer receipt production_effects_authorized",
+    )
+    base_observed = require_utc(base_receipt["observed_at"], "base producer receipt observed_at")
+    age = (current - base_observed).total_seconds()
+    if age < -freshness["future_skew_seconds"] or age > freshness["maximum_age_seconds"]:
+        raise ValidationError("base producer receipt is outside freshness policy")
+    base_facts = base_receipt["facts"]
+    if not isinstance(base_facts, dict) or not base_facts:
+        raise ValidationError("base producer receipt facts are missing")
+    FACT_VALIDATORS[evidence_id](base_facts, False)
+    return sha256_bytes(base_receipt_bytes), base_facts["material_binding_sha256"]
 
 
 def validate_contract(
@@ -514,6 +638,8 @@ def validate_subject(
     *,
     authority_revision: str,
     expected_heim_pc_revision: str,
+    base_receipt: dict[str, Any] | None = None,
+    base_receipt_bytes: bytes | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     requirements = validate_contract(contract, contract_bytes, authority_revision=authority_revision)
@@ -541,7 +667,7 @@ def validate_subject(
     evidence_id = provenance["evidence_id"]
     if evidence_id not in requirements:
         raise ValidationError("provenance evidence id is foreign")
-    scope, restore_required, producer, base_schema = requirements[evidence_id]
+    scope, restore_required, producer, _base_schema = requirements[evidence_id]
     restore = provenance["kind"] == "heim_pc.nixos_recovery_restore_test_provenance"
     if restore and not restore_required:
         raise ValidationError("restore-test provenance is not required for this evidence")
@@ -559,11 +685,7 @@ def validate_subject(
         raise ValidationError("provenance recovery contract digest mismatch")
     if provenance["status"] != "passed":
         raise ValidationError("provenance did not pass")
-    require_bool(
-        provenance["production_effects_authorized"],
-        False,
-        "production_effects_authorized",
-    )
+    require_bool(provenance["production_effects_authorized"], False, "production_effects_authorized")
 
     observed = require_utc(provenance["observed_at"], "provenance observed_at")
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -615,6 +737,28 @@ def validate_subject(
         raise ValidationError("producer receipt facts are missing")
     FACT_VALIDATORS[evidence_id](facts, restore)
 
+    if restore:
+        if base_receipt is None or base_receipt_bytes is None:
+            raise ValidationError("restore provenance requires signed base producer receipt")
+        base_sha, base_binding = validate_base_receipt_for_restore(
+            base_receipt,
+            base_receipt_bytes,
+            evidence_id=evidence_id,
+            scope=scope,
+            producer=producer,
+            source_revision=provenance["source_revision"],
+            recovery_contract_sha256=contract_sha,
+            current=current,
+            freshness=freshness,
+        )
+        if facts["base_producer_receipt_sha256"] != base_sha:
+            raise ValidationError("restore facts base producer receipt digest mismatch")
+        if facts["material_binding_sha256"] != base_binding:
+            raise ValidationError("restore facts material binding differs from base evidence")
+        base_observed = require_utc(base_receipt["observed_at"], "base producer receipt observed_at")
+        if base_observed > observed:
+            raise ValidationError("base producer receipt is newer than restore test")
+
     evidence = provenance["evidence"]
     if not isinstance(evidence, dict):
         raise ValidationError("provenance evidence payload missing")
@@ -625,7 +769,11 @@ def validate_subject(
     )
     if evidence["schema_version"] != 1 or evidence["kind"] != schema or evidence["result"] != "passed":
         raise ValidationError("provenance evidence schema/result mismatch")
-    if evidence["facts"] != facts:
+    provenance_facts = evidence["facts"]
+    if not isinstance(provenance_facts, dict) or not provenance_facts:
+        raise ValidationError("provenance evidence facts are missing")
+    FACT_VALIDATORS[evidence_id](provenance_facts, restore)
+    if sha256_json(provenance_facts) != sha256_json(facts):
         raise ValidationError("provenance evidence facts differ from producer receipt")
     receipt_sha = sha256_bytes(receipt_bytes)
     if evidence["producer_receipt_sha256"] != receipt_sha:
@@ -654,6 +802,8 @@ def main() -> int:
     parser.add_argument("--provenance", type=Path, required=True)
     parser.add_argument("--producer-receipt", type=Path, required=True)
     parser.add_argument("--producer-signature", type=Path, required=True)
+    parser.add_argument("--base-producer-receipt", type=Path)
+    parser.add_argument("--base-producer-signature", type=Path)
     parser.add_argument("--allowed-signers", type=Path, required=True)
     parser.add_argument("--recovery-contract", type=Path, required=True)
     parser.add_argument("--authority-revision", required=True)
@@ -663,11 +813,26 @@ def main() -> int:
 
     provenance, provenance_bytes = load_json_bytes(args.provenance, "provenance")
     receipt, receipt_bytes = load_json_bytes(args.producer_receipt, "producer receipt")
-    verify_producer_signature(
-        receipt_bytes,
-        args.producer_signature,
-        args.allowed_signers,
-    )
+    verify_producer_signature(receipt_bytes, args.producer_signature, args.allowed_signers)
+
+    restore = provenance.get("kind") == "heim_pc.nixos_recovery_restore_test_provenance"
+    base_receipt = None
+    base_receipt_bytes = None
+    if restore:
+        if args.base_producer_receipt is None or args.base_producer_signature is None:
+            raise ValidationError("restore provenance requires base producer receipt and signature")
+        base_receipt, base_receipt_bytes = load_json_bytes(
+            args.base_producer_receipt,
+            "base producer receipt",
+        )
+        verify_producer_signature(
+            base_receipt_bytes,
+            args.base_producer_signature,
+            args.allowed_signers,
+        )
+    elif args.base_producer_receipt is not None or args.base_producer_signature is not None:
+        raise ValidationError("base producer receipt inputs are only valid for restore provenance")
+
     contract, contract_bytes = load_json_bytes(args.recovery_contract, "recovery contract")
     predicate = validate_subject(
         provenance,
@@ -678,6 +843,8 @@ def main() -> int:
         contract_bytes,
         authority_revision=args.authority_revision,
         expected_heim_pc_revision=args.expected_heim_pc_revision,
+        base_receipt=base_receipt,
+        base_receipt_bytes=base_receipt_bytes,
     )
     args.write_predicate.write_text(
         json.dumps(predicate, sort_keys=True, separators=(",", ":")) + "\n",
