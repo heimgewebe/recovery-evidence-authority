@@ -66,7 +66,15 @@ jobs:
           HEIM_PC_MAIN="$(git ls-remote https://github.com/heimgewebe/heim-pc.git refs/heads/main | cut -f1)"
           printf '%s\n' "$HEIM_PC_MAIN" | grep -Eq '^[0-9a-f]{40}$'
 
-          python3 validator.py             --provenance "$PROVENANCE"             --producer-receipt "$PRODUCER_RECEIPT"             --recovery-contract "$RECOVERY_CONTRACT"             --authority-revision "$GITHUB_SHA"             --expected-heim-pc-revision "$HEIM_PC_MAIN"             --write-predicate "$PREDICATE"
+          python3 validator.py \
+            --provenance "$PROVENANCE" \
+            --producer-receipt "$PRODUCER_RECEIPT" \
+            --producer-signature "$PRODUCER_SIGNATURE" \
+            --allowed-signers "$GITHUB_WORKSPACE/keys/allowed_signers" \
+            --recovery-contract "$RECOVERY_CONTRACT" \
+            --authority-revision "$GITHUB_SHA" \
+            --expected-heim-pc-revision "$HEIM_PC_MAIN" \
+            --write-predicate "$PREDICATE"
 
           test -s "$PREDICATE"
           EVIDENCE_ID="$(python3 -c 'import json,os; print(json.load(open(os.environ["PREDICATE"]))["evidence_id"])')"
