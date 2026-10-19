@@ -56,12 +56,34 @@ def sha256_json(value: Any) -> str:
     return sha256_bytes(payload)
 
 
+def _unambiguous_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate names at every depth, including escaped equivalents."""
+    result: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in result:
+            # Never echo untrusted member names: evidence may contain redacted
+            # identifiers not intended for public GitHub Actions job logs.
+            raise ValidationError("signed JSON contains duplicate object member")
+        result[key] = item
+    return result
+
+
+def _reject_non_json_constant(_token: str) -> None:
+    # Python's json.loads accepts NaN/Infinity by default even though none is
+    # valid JSON. A signed receipt must have one standard interpretation.
+    raise ValidationError("signed JSON contains non-standard numeric constant")
+
+
 def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tuple[dict[str, Any], bytes]:
     payload = path.read_bytes()
     if not payload or len(payload) > max_bytes:
         raise ValidationError(f"{label} size is outside the bounded contract")
     try:
-        value = json.loads(payload.decode("utf-8"))
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_unambiguous_json_object,
+            parse_constant=_reject_non_json_constant,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValidationError(f"{label} is not valid UTF-8 JSON") from exc
     if not isinstance(value, dict):

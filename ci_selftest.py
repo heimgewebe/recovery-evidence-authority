@@ -238,5 +238,22 @@ class SecuritySelfTest(unittest.TestCase):
             self.assertEqual(b"exact-receipt\n", observed["input"])
 
 
+    def test_signed_json_parser_rejects_duplicate_members_and_nonstandard_values(self):
+        cases = (
+            b'{"evidence":{"status":"passed","status":"denied"}}',
+            b'{"facts":{"offline":true,"offl\\u0069ne":false}}',
+            b'{"facts":{"time":NaN}}',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "signed-receipt.json"
+            for payload in cases:
+                with self.subTest(payload=payload):
+                    path.write_bytes(payload)
+                    with self.assertRaisesRegex(
+                        validator.ValidationError, "duplicate|non-standard"
+                    ):
+                        validator.load_json_bytes(path, "producer receipt")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

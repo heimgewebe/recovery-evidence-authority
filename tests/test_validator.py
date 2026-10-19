@@ -448,3 +448,36 @@ def test_producer_signature_verifier_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(validator.subprocess, "run", fake_run)
     with pytest.raises(validator.ValidationError, match="signature verification failed"):
         validator.verify_producer_signature(b"receipt\n", signature, allowed)
+
+
+@pytest.mark.parametrize("label", [
+    "provenance", "producer receipt", "base producer receipt", "recovery contract",
+])
+@pytest.mark.parametrize("payload", [
+    b'{"status":"passed","status":"denied"}',
+    b'{"evidence":{"facts":{"offline":true,"offline":false}}}',
+    b'{"evidence":{"facts":{"offline":true,"offl\\u0069ne":false}}}',
+    b'{"facts":{"integer":NaN}}',
+    b'{"facts":{"integer":Infinity}}',
+    b'{"facts":{"integer":-Infinity}}',
+])
+def test_signed_json_input_rejects_ambiguous_or_non_json_values(
+    tmp_path, label, payload,
+):
+    """The exact attested bytes must have one interpretation across parsers."""
+    path = tmp_path / "untrusted-signed-input.json"
+    path.write_bytes(payload)
+    with pytest.raises(validator.ValidationError, match="duplicate|non-standard"):
+        validator.load_json_bytes(path, label)
+
+
+def test_signed_json_strict_parser_retains_exact_bytes_and_nested_values(tmp_path):
+    payload = b'{"facts":{"offline":true,"snapshot":"verified"},"schema_version":1}\n'
+    path = tmp_path / "valid-signed-input.json"
+    path.write_bytes(payload)
+    parsed, exact = validator.load_json_bytes(path, "producer receipt")
+    assert exact == payload
+    assert parsed == {
+        "facts": {"offline": True, "snapshot": "verified"},
+        "schema_version": 1,
+    }
