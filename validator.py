@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -74,6 +75,15 @@ def _reject_non_json_constant(_token: str) -> None:
     raise ValidationError("signed JSON contains non-standard numeric constant")
 
 
+def _finite_json_float(token: str) -> float:
+    # JSON exponent syntax is valid, but float('1e309') becomes infinity.
+    # Never admit a non-finite numeric value in signed evidence.
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValidationError("signed JSON contains non-finite numeric value")
+    return value
+
+
 def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tuple[dict[str, Any], bytes]:
     payload = path.read_bytes()
     if not payload or len(payload) > max_bytes:
@@ -83,6 +93,7 @@ def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tupl
             payload.decode("utf-8"),
             object_pairs_hook=_unambiguous_json_object,
             parse_constant=_reject_non_json_constant,
+            parse_float=_finite_json_float,
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValidationError(f"{label} is not valid UTF-8 JSON") from exc
