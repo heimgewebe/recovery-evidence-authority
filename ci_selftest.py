@@ -255,5 +255,87 @@ class SecuritySelfTest(unittest.TestCase):
                         validator.load_json_bytes(path, "producer receipt")
 
 
+    def test_real_sshsig_rejects_tampering_and_unpinned_signer(self):
+        """Real OpenSSH primitive; ephemeral fixture key is NOT the heimberry key."""
+        import subprocess
+
+        receipt = b'{"kind":"synthetic-unsigned-recovery-fixture","result":"passed"}\n'
+        env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+        with tempfile.TemporaryDirectory(prefix="recovery-sshsig-ci-") as scratch:
+            root = Path(scratch)
+            private_key = root / "ephemeral-test-only"
+            signature = root / "receipt.sig"
+            test_signers = root / "test-allowed-signers"
+            fake_signers = root / "incorrect-principal"
+            subprocess.run(
+                [
+                    validator.SSH_KEYGEN, "-q", "-t", "ed25519",
+                    "-N", "", "-f", str(private_key),
+                ],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=15, env=env,
+            )
+            public_key = private_key.with_suffix(".pub").read_text(
+                encoding="ascii"
+            ).strip()
+            test_signers.write_text(
+                validator.PRODUCER_SIGNER_IDENTITY + " " + public_key + "\n",
+                encoding="ascii",
+            )
+            fake_signers.write_text(
+                "unapproved-recovery-producer " + public_key + "\n",
+                encoding="ascii",
+            )
+
+            def sign(namespace):
+                completed = subprocess.run(
+                    [
+                        validator.SSH_KEYGEN, "-Y", "sign", "-f",
+                        str(private_key), "-n", namespace,
+                    ],
+                    input=receipt, check=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, timeout=15, env=env,
+                )
+                signature.write_bytes(completed.stdout)
+                self.assertTrue(
+                    completed.stdout.startswith(b"-----BEGIN SSH SIGNATURE-----")
+                )
+
+            sign(validator.PRODUCER_SIGNATURE_NAMESPACE)
+            observed = validator.verify_producer_signature(
+                receipt, signature, test_signers
+            )
+            self.assertEqual(
+                hashlib.sha256(signature.read_bytes()).hexdigest(),
+                observed["producer_signature_sha256"],
+            )
+            with self.assertRaisesRegex(
+                validator.ValidationError, "signature verification failed"
+            ):
+                validator.verify_producer_signature(
+                    receipt.replace(b'"passed"', b'"denied"'),
+                    signature, test_signers,
+                )
+            with self.assertRaises(validator.ValidationError):
+                validator.verify_producer_signature(
+                    receipt + b" ", signature, test_signers
+                )
+            with self.assertRaises(validator.ValidationError):
+                validator.verify_producer_signature(
+                    receipt, signature, fake_signers
+                )
+
+            pinned = Path(__file__).resolve().parent / "keys" / "allowed_signers"
+            self.assertTrue(pinned.is_file(), "authority public key must be pinned")
+            with self.assertRaises(validator.ValidationError):
+                validator.verify_producer_signature(receipt, signature, pinned)
+
+            sign("unauthorized-recovery-domain")
+            with self.assertRaises(validator.ValidationError):
+                validator.verify_producer_signature(
+                    receipt, signature, test_signers
+                )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
