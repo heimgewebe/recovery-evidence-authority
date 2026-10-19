@@ -326,8 +326,18 @@ class SecuritySelfTest(unittest.TestCase):
                 )
 
             pinned = Path(__file__).resolve().parent / "keys" / "allowed_signers"
-            self.assertTrue(pinned.is_file(), "authority public key must be pinned")
-            with self.assertRaises(validator.ValidationError):
+            # Independent, reviewed production PUBLIC-key anchor. A missing,
+            # truncated or rotated key must fail the CI gate *before* we
+            # interpret the ephemeral-signature mismatch as successful denial.
+            # Key rotation requires an explicit reviewed update of this hash.
+            self.assertEqual(
+                hashlib.sha256(pinned.read_bytes()).hexdigest(),
+                "41ba9ae93d08b0d0a6ab037aa51ea4257cdcea6eedac310becee0c06832cc493",
+                "production allowed-signers public key identity drifted",
+            )
+            with self.assertRaisesRegex(
+                validator.ValidationError, "signature verification failed"
+            ):
                 validator.verify_producer_signature(receipt, signature, pinned)
 
             sign("unauthorized-recovery-domain")
