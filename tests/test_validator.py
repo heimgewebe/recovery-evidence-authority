@@ -460,6 +460,9 @@ def test_producer_signature_verifier_fails_closed(monkeypatch, tmp_path):
     b'{"facts":{"integer":NaN}}',
     b'{"facts":{"integer":Infinity}}',
     b'{"facts":{"integer":-Infinity}}',
+    b'{"facts":{"integer":1e309}}',
+    b'{"facts":{"integer":-1e309}}',
+    b'{"evidence":{"nested":[{"number":1.0E+9999}]}}',
 ])
 def test_signed_json_input_rejects_ambiguous_or_non_json_values(
     tmp_path, label, payload,
@@ -467,7 +470,7 @@ def test_signed_json_input_rejects_ambiguous_or_non_json_values(
     """The exact attested bytes must have one interpretation across parsers."""
     path = tmp_path / "untrusted-signed-input.json"
     path.write_bytes(payload)
-    with pytest.raises(validator.ValidationError, match="duplicate|non-standard"):
+    with pytest.raises(validator.ValidationError, match="duplicate|non-standard|non-finite"):
         validator.load_json_bytes(path, label)
 
 

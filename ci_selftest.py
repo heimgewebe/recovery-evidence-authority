@@ -243,6 +243,8 @@ class SecuritySelfTest(unittest.TestCase):
             b'{"evidence":{"status":"passed","status":"denied"}}',
             b'{"facts":{"offline":true,"offl\\u0069ne":false}}',
             b'{"facts":{"time":NaN}}',
+            b'{"facts":{"time":1e309}}',
+            b'{"facts":{"time":-1.0E9999}}',
         )
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "signed-receipt.json"
@@ -250,7 +252,7 @@ class SecuritySelfTest(unittest.TestCase):
                 with self.subTest(payload=payload):
                     path.write_bytes(payload)
                     with self.assertRaisesRegex(
-                        validator.ValidationError, "duplicate|non-standard"
+                        validator.ValidationError, "duplicate|non-standard|non-finite"
                     ):
                         validator.load_json_bytes(path, "producer receipt")
 
