@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
+import math
+import os
 import re
 import subprocess
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +31,8 @@ ATTESTATION_KIND = "heim_pc.nixos_recovery_provenance_attestation"
 SSH_KEYGEN = "/usr/bin/ssh-keygen"
 PRODUCER_SIGNER_IDENTITY = "heimberry-recovery-producer"
 PRODUCER_SIGNATURE_NAMESPACE = "heim-pc-recovery-evidence"
+# Independently pinned by ci_selftest.py; changing this digest is a trust-root rotation.
+PINNED_ALLOWED_SIGNERS_SHA256 = "41ba9ae93d08b0d0a6ab037aa51ea4257cdcea6eedac310becee0c06832cc493"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -56,12 +62,44 @@ def sha256_json(value: Any) -> str:
     return sha256_bytes(payload)
 
 
+def _unambiguous_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate names at every depth, including escaped equivalents."""
+    result: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in result:
+            # Never echo untrusted member names: evidence may contain redacted
+            # identifiers not intended for public GitHub Actions job logs.
+            raise ValidationError("signed JSON contains duplicate object member")
+        result[key] = item
+    return result
+
+
+def _reject_non_json_constant(_token: str) -> None:
+    # Python's json.loads accepts NaN/Infinity by default even though none is
+    # valid JSON. A signed receipt must have one standard interpretation.
+    raise ValidationError("signed JSON contains non-standard numeric constant")
+
+
+def _finite_json_float(token: str) -> float:
+    # JSON exponent syntax is valid, but float('1e309') becomes infinity.
+    # Never admit a non-finite numeric value in signed evidence.
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValidationError("signed JSON contains non-finite numeric value")
+    return value
+
+
 def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tuple[dict[str, Any], bytes]:
     payload = path.read_bytes()
     if not payload or len(payload) > max_bytes:
         raise ValidationError(f"{label} size is outside the bounded contract")
     try:
-        value = json.loads(payload.decode("utf-8"))
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_unambiguous_json_object,
+            parse_constant=_reject_non_json_constant,
+            parse_float=_finite_json_float,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValidationError(f"{label} is not valid UTF-8 JSON") from exc
     if not isinstance(value, dict):
@@ -69,42 +107,109 @@ def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tupl
     return value, payload
 
 
+def _read_bounded_evidence_file(path: Path, label: str) -> bytes:
+    """Read bounded regular evidence once; consumers must not reopen its path."""
+    if path.is_symlink() or not path.is_file():
+        raise ValidationError(f"{label} requires a regular file")
+    try:
+        with path.open("rb") as stream:
+            exact = stream.read(64 * 1024 + 1)
+    except OSError as exc:
+        raise ValidationError(f"{label} is unreadable") from exc
+    if not exact or len(exact) > 64 * 1024:
+        raise ValidationError(f"{label} size is outside the bounded contract")
+    return exact
+
+
+def _allowed_signers_bytes(
+    path: Path, *, test_only_allow_unpinned_signers: bool = False
+) -> bytes:
+    exact = _read_bounded_evidence_file(path, "allowed-signers pin")
+    if not isinstance(test_only_allow_unpinned_signers, bool):
+        raise ValidationError("allowed-signers pin mode must be boolean")
+    if (
+        not test_only_allow_unpinned_signers
+        and sha256_bytes(exact) != PINNED_ALLOWED_SIGNERS_SHA256
+    ):
+        raise ValidationError("allowed-signers production pin mismatch")
+    return exact
+
+
+def require_pinned_allowed_signers(path: Path) -> str:
+    """Preflight the audited production root before parsing unsigned inputs."""
+    return sha256_bytes(_allowed_signers_bytes(path))
+
+
+def _sealed_evidence_memfd(payload: bytes, label: str) -> int:
+    """Keep the exact verified bytes immutable even under same-UID path swaps."""
+    descriptor = -1
+    try:
+        descriptor = os.memfd_create(
+            label, flags=os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
+        )
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("sealed sshsig snapshot write incomplete")
+            offset += written
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        fcntl.fcntl(
+            descriptor,
+            fcntl.F_ADD_SEALS,
+            fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SEAL,
+        )
+        return descriptor
+    except (OSError, AttributeError) as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise ValidationError("sealed sshsig evidence snapshot unavailable") from exc
+
+
 def verify_producer_signature(
     receipt_bytes: bytes,
     signature_path: Path,
     allowed_signers_path: Path,
+    *,
+    test_only_allow_unpinned_signers: bool = False,
 ) -> dict[str, str]:
-    """Verify the exact producer-receipt bytes against the pinned external signer."""
-    signature_bytes = signature_path.read_bytes()
-    if not signature_bytes or len(signature_bytes) > 64 * 1024:
-        raise ValidationError("producer signature size is outside the bounded contract")
-    allowed_signers_bytes = allowed_signers_path.read_bytes()
-    if not allowed_signers_bytes or len(allowed_signers_bytes) > 64 * 1024:
-        raise ValidationError("allowed signers file is outside the bounded contract")
-    argv = [
-        SSH_KEYGEN,
-        "-Y",
-        "verify",
-        "-f",
-        str(allowed_signers_path),
-        "-I",
-        PRODUCER_SIGNER_IDENTITY,
-        "-n",
-        PRODUCER_SIGNATURE_NAMESPACE,
-        "-s",
-        str(signature_path),
-    ]
-    try:
-        result = subprocess.run(
-            argv,
-            input=receipt_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
-        )
-    except OSError as exc:
-        raise ValidationError("producer signature verifier could not execute") from exc
+    """Verify exact receipts using immutable signer and signature bytes.
+
+    Production verification always pins the independently reviewed public key.
+    Test-only unpinned mode exists solely for synthetic OpenSSH fixture keys.
+    """
+    signature_bytes = _read_bounded_evidence_file(signature_path, "producer signature")
+    allowed_signers_bytes = _allowed_signers_bytes(
+        allowed_signers_path,
+        test_only_allow_unpinned_signers=test_only_allow_unpinned_signers,
+    )
+    with ExitStack() as stack:
+        signer_fd = _sealed_evidence_memfd(allowed_signers_bytes, "recovery-signers")
+        stack.callback(os.close, signer_fd)
+        signature_fd = _sealed_evidence_memfd(signature_bytes, "recovery-signature")
+        stack.callback(os.close, signature_fd)
+        # Both procfd paths resolve only the sealed, inherited descriptors;
+        # no caller-controlled path is reopened by the OpenSSH verifier.
+        argv = [
+            SSH_KEYGEN, "-Y", "verify",
+            "-f", f"/proc/self/fd/{signer_fd}",
+            "-I", PRODUCER_SIGNER_IDENTITY,
+            "-n", PRODUCER_SIGNATURE_NAMESPACE,
+            "-s", f"/proc/self/fd/{signature_fd}",
+        ]
+        try:
+            result = subprocess.run(
+                argv,
+                input=receipt_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                pass_fds=(signer_fd, signature_fd),
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+            )
+        except OSError as exc:
+            raise ValidationError("producer signature verifier could not execute") from exc
     if result.returncode != 0:
         raise ValidationError("producer receipt signature verification failed")
     return {
@@ -810,6 +915,9 @@ def main() -> int:
     parser.add_argument("--expected-heim-pc-revision", required=True)
     parser.add_argument("--write-predicate", type=Path, required=True)
     args = parser.parse_args()
+
+    # No caller-selected signer may become an admitted recovery trust root.
+    require_pinned_allowed_signers(args.allowed_signers)
 
     provenance, provenance_bytes = load_json_bytes(args.provenance, "provenance")
     receipt, receipt_bytes = load_json_bytes(args.producer_receipt, "producer receipt")

@@ -1,6 +1,9 @@
 import hashlib
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -417,18 +420,30 @@ def test_producer_signature_verifier_uses_exact_receipt_bytes(monkeypatch, tmp_p
         observed["argv"] = argv
         observed["input"] = kwargs["input"]
         observed["env"] = kwargs["env"]
+        observed["pass_fds"] = kwargs["pass_fds"]
+        observed["allowed_bytes"] = Path(argv[4]).read_bytes()
+        observed["signature_bytes"] = Path(argv[10]).read_bytes()
+        for descriptor in observed["pass_fds"]:
+            with pytest.raises(OSError):
+                os.write(descriptor, b"forbidden")
         return validator.subprocess.CompletedProcess(argv, 0, b"Good signature\n", b"")
 
     monkeypatch.setattr(validator.subprocess, "run", fake_run)
     result = validator.verify_producer_signature(receipt_bytes, signature, allowed)
     assert observed["input"] == receipt_bytes
-    assert observed["argv"] == [
-        "/usr/bin/ssh-keygen", "-Y", "verify",
-        "-f", str(allowed),
+    argv = observed["argv"]
+    assert argv[:4] == ["/usr/bin/ssh-keygen", "-Y", "verify", "-f"]
+    assert argv[5:10] == [
         "-I", "heimberry-recovery-producer",
-        "-n", "heim-pc-recovery-evidence",
-        "-s", str(signature),
+        "-n", "heim-pc-recovery-evidence", "-s",
     ]
+    assert argv[4].startswith("/proc/self/fd/")
+    assert argv[10].startswith("/proc/self/fd/")
+    assert observed["pass_fds"] == (
+        int(argv[4].rsplit("/", 1)[1]), int(argv[10].rsplit("/", 1)[1])
+    )
+    assert observed["allowed_bytes"] == allowed.read_bytes()
+    assert observed["signature_bytes"] == signature.read_bytes()
     assert observed["env"]["PATH"] == "/usr/bin:/bin"
     assert result["producer_signature_sha256"] == hashlib.sha256(signature.read_bytes()).hexdigest()
 
@@ -448,3 +463,127 @@ def test_producer_signature_verifier_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(validator.subprocess, "run", fake_run)
     with pytest.raises(validator.ValidationError, match="signature verification failed"):
         validator.verify_producer_signature(b"receipt\n", signature, allowed)
+
+
+@pytest.mark.parametrize("label", [
+    "provenance", "producer receipt", "base producer receipt", "recovery contract",
+])
+@pytest.mark.parametrize("payload", [
+    b'{"status":"passed","status":"denied"}',
+    b'{"evidence":{"facts":{"offline":true,"offline":false}}}',
+    b'{"evidence":{"facts":{"offline":true,"offl\\u0069ne":false}}}',
+    b'{"facts":{"integer":NaN}}',
+    b'{"facts":{"integer":Infinity}}',
+    b'{"facts":{"integer":-Infinity}}',
+    b'{"facts":{"integer":1e309}}',
+    b'{"facts":{"integer":-1e309}}',
+    b'{"evidence":{"nested":[{"number":1.0E+9999}]}}',
+])
+def test_signed_json_input_rejects_ambiguous_or_non_json_values(
+    tmp_path, label, payload,
+):
+    """The exact attested bytes must have one interpretation across parsers."""
+    path = tmp_path / "untrusted-signed-input.json"
+    path.write_bytes(payload)
+    with pytest.raises(validator.ValidationError, match="duplicate|non-standard|non-finite"):
+        validator.load_json_bytes(path, label)
+
+
+def test_signed_json_strict_parser_retains_exact_bytes_and_nested_values(tmp_path):
+    payload = b'{"facts":{"offline":true,"snapshot":"verified"},"schema_version":1}\n'
+    path = tmp_path / "valid-signed-input.json"
+    path.write_bytes(payload)
+    parsed, exact = validator.load_json_bytes(path, "producer receipt")
+    assert exact == payload
+    assert parsed == {
+        "facts": {"offline": True, "snapshot": "verified"},
+        "schema_version": 1,
+    }
+
+
+def test_production_allowed_signers_pin_is_exact_and_rejects_foreign_key(tmp_path):
+    """The audited production key must not be supplied by an arbitrary caller."""
+    pinned = ROOT / "keys" / "allowed_signers"
+    assert validator.require_pinned_allowed_signers(pinned) == (
+        "41ba9ae93d08b0d0a6ab037aa51ea4257cdcea6eedac310becee0c06832cc493"
+    )
+    foreign = tmp_path / "foreign-allowed-signers"
+    foreign.write_bytes(pinned.read_bytes() + b"\n")
+    with pytest.raises(validator.ValidationError, match="allowed-signers.*pin"):
+        validator.require_pinned_allowed_signers(foreign)
+
+
+def test_recovery_cli_denies_unpinned_signer_even_if_signature_verifies(monkeypatch, tmp_path):
+    """A valid signature from a caller-picked key is not a production signer."""
+    foreign = tmp_path / "foreign-allowed-signers"
+    foreign.write_bytes((ROOT / "keys" / "allowed_signers").read_bytes() + b"\n")
+    predicate = tmp_path / "predicate.json"
+    monkeypatch.setattr(sys, "argv", [
+        "validator.py",
+        "--provenance", str(tmp_path / "provenance.json"),
+        "--producer-receipt", str(tmp_path / "receipt.json"),
+        "--producer-signature", str(tmp_path / "receipt.sig"),
+        "--allowed-signers", str(foreign),
+        "--recovery-contract", str(tmp_path / "contract.json"),
+        "--authority-revision", AUTH_REV,
+        "--expected-heim-pc-revision", HEIM_REV,
+        "--write-predicate", str(predicate),
+    ])
+    seen = []
+    monkeypatch.setattr(
+        validator, "load_json_bytes",
+        lambda _path, label: ({"kind": "synthetic-base"}, label.encode()),
+    )
+    def forged_success(*args, **kwargs):
+        seen.append("signature_was_accepted")
+        return {"producer_signature_sha256": "1" * 64}
+    monkeypatch.setattr(validator, "verify_producer_signature", forged_success)
+    monkeypatch.setattr(validator, "validate_subject", lambda *a, **kw: {
+        "evidence_id": "off-host-home-restore",
+        "provenance_kind": "synthetic-base",
+        "source_revision": AUTH_REV,
+        "provenance_sha256": "2" * 64,
+        "producer_receipt_sha256": "3" * 64,
+    })
+    with pytest.raises(validator.ValidationError, match="allowed-signers.*pin"):
+        validator.main()
+    assert seen == []
+    assert not predicate.exists()
+
+
+def test_production_signature_rejects_attacker_signer_swap_after_pin(monkeypatch, tmp_path):
+    """The verifier must use the exact pinned bytes, not reopen a mutable path."""
+    env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+    secret = tmp_path / "foreign-ed25519"
+    subprocess.run(
+        [validator.SSH_KEYGEN, "-q", "-t", "ed25519", "-N", "", "-f", str(secret)],
+        check=True, capture_output=True, timeout=15, env=env,
+    )
+    receipt = b'{"kind":"adversarial-foreign-producer"}\n'
+    signature = tmp_path / "receipt.sig"
+    signature.write_bytes(subprocess.run(
+        [validator.SSH_KEYGEN, "-Y", "sign", "-f", str(secret),
+         "-n", validator.PRODUCER_SIGNATURE_NAMESPACE],
+        input=receipt, check=True, capture_output=True, timeout=15, env=env,
+    ).stdout)
+    public_key = secret.with_suffix(".pub").read_text(encoding="ascii").strip()
+    allowed = tmp_path / "allowed_signers"
+    pinned_bytes = (ROOT / "keys" / "allowed_signers").read_bytes()
+    allowed.write_bytes(pinned_bytes)
+    actual_run = validator.subprocess.run
+    swapped = []
+    def swap_before_verification(argv, **kwargs):
+        if argv[:3] == [validator.SSH_KEYGEN, "-Y", "verify"]:
+            # The caller owns the original path. A pin checked before this
+            # operation must not be replaced by another signer's key.
+            allowed.write_text(
+                validator.PRODUCER_SIGNER_IDENTITY + " " + public_key + "\n",
+                encoding="ascii",
+            )
+            swapped.append(True)
+        return actual_run(argv, **kwargs)
+    monkeypatch.setattr(validator.subprocess, "run", swap_before_verification)
+    with pytest.raises(validator.ValidationError, match="signature verification failed"):
+        validator.verify_producer_signature(receipt, signature, allowed)
+    assert swapped == [True]
+    assert allowed.read_bytes() != pinned_bytes
