@@ -305,7 +305,8 @@ class SecuritySelfTest(unittest.TestCase):
 
             sign(validator.PRODUCER_SIGNATURE_NAMESPACE)
             observed = validator.verify_producer_signature(
-                receipt, signature, test_signers
+                receipt, signature, test_signers,
+                test_only_allow_unpinned_signers=True,
             )
             self.assertEqual(
                 hashlib.sha256(signature.read_bytes()).hexdigest(),
@@ -317,14 +318,17 @@ class SecuritySelfTest(unittest.TestCase):
                 validator.verify_producer_signature(
                     receipt.replace(b'"passed"', b'"denied"'),
                     signature, test_signers,
+                    test_only_allow_unpinned_signers=True,
                 )
             with self.assertRaises(validator.ValidationError):
                 validator.verify_producer_signature(
-                    receipt + b" ", signature, test_signers
+                    receipt + b" ", signature, test_signers,
+                    test_only_allow_unpinned_signers=True,
                 )
             with self.assertRaises(validator.ValidationError):
                 validator.verify_producer_signature(
-                    receipt, signature, fake_signers
+                    receipt, signature, fake_signers,
+                    test_only_allow_unpinned_signers=True,
                 )
 
             pinned = Path(__file__).resolve().parent / "keys" / "allowed_signers"
@@ -341,6 +345,31 @@ class SecuritySelfTest(unittest.TestCase):
                 validator.ValidationError, "signature verification failed"
             ):
                 validator.verify_producer_signature(receipt, signature, pinned)
+
+            # Real adversarial signer-path replacement between hash and child
+            # verification: only sealed, originally pinned bytes may be used.
+            sign(validator.PRODUCER_SIGNATURE_NAMESPACE)
+            mutable_signers = root / "caller-controlled-signers"
+            mutable_signers.write_bytes(pinned.read_bytes())
+            actual_run = validator.subprocess.run
+            swapped = []
+
+            def swap_during_verify(argv, **kwargs):
+                if argv[:3] == [validator.SSH_KEYGEN, "-Y", "verify"]:
+                    mutable_signers.write_bytes(test_signers.read_bytes())
+                    swapped.append(True)
+                return actual_run(argv, **kwargs)
+
+            with patch.object(
+                validator.subprocess, "run", side_effect=swap_during_verify,
+            ):
+                with self.assertRaisesRegex(
+                    validator.ValidationError, "signature verification failed"
+                ):
+                    validator.verify_producer_signature(
+                        receipt, signature, mutable_signers,
+                    )
+            self.assertEqual(swapped, [True])
 
             sign("unauthorized-recovery-domain")
             with self.assertRaises(validator.ValidationError):
