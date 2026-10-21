@@ -28,6 +28,8 @@ ATTESTATION_KIND = "heim_pc.nixos_recovery_provenance_attestation"
 SSH_KEYGEN = "/usr/bin/ssh-keygen"
 PRODUCER_SIGNER_IDENTITY = "heimberry-recovery-producer"
 PRODUCER_SIGNATURE_NAMESPACE = "heim-pc-recovery-evidence"
+# Independently pinned by ci_selftest.py; changing this digest is a trust-root rotation.
+PINNED_ALLOWED_SIGNERS_SHA256 = "41ba9ae93d08b0d0a6ab037aa51ea4257cdcea6eedac310becee0c06832cc493"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -100,6 +102,26 @@ def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tupl
     if not isinstance(value, dict):
         raise ValidationError(f"{label} must be a JSON object")
     return value, payload
+
+
+def require_pinned_allowed_signers(path: Path) -> str:
+    """Admit only the independently audited production producer public key."""
+    # The CLI accepts a path, not authority to choose a signer. Reject
+    # attacker-supplied files even when OpenSSH validates their signatures.
+    if path.is_symlink() or not path.is_file():
+        raise ValidationError("allowed-signers pin requires a regular file")
+    try:
+        with path.open("rb") as stream:
+            exact = stream.read(64 * 1024 + 1)
+    except OSError as exc:
+        raise ValidationError("allowed-signers pin is unreadable") from exc
+    if (
+        not exact
+        or len(exact) > 64 * 1024
+        or sha256_bytes(exact) != PINNED_ALLOWED_SIGNERS_SHA256
+    ):
+        raise ValidationError("allowed-signers production pin mismatch")
+    return PINNED_ALLOWED_SIGNERS_SHA256
 
 
 def verify_producer_signature(
@@ -843,6 +865,9 @@ def main() -> int:
     parser.add_argument("--expected-heim-pc-revision", required=True)
     parser.add_argument("--write-predicate", type=Path, required=True)
     args = parser.parse_args()
+
+    # No caller-selected signer may become an admitted recovery trust root.
+    require_pinned_allowed_signers(args.allowed_signers)
 
     provenance, provenance_bytes = load_json_bytes(args.provenance, "provenance")
     receipt, receipt_bytes = load_json_bytes(args.producer_receipt, "producer receipt")

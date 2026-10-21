@@ -348,6 +348,43 @@ class SecuritySelfTest(unittest.TestCase):
                     receipt, signature, test_signers
                 )
 
+    def test_main_rejects_foreign_signer_even_before_receipt_parsing(self):
+        """CI must fail when a plausible caller replaces the trusted signers."""
+        pinned = Path(__file__).resolve().parent / "keys" / "allowed_signers"
+        self.assertEqual(
+            validator.require_pinned_allowed_signers(pinned),
+            "41ba9ae93d08b0d0a6ab037aa51ea4257cdcea6eedac310becee0c06832cc493",
+        )
+        with tempfile.TemporaryDirectory(prefix="recovery-foreign-signer-") as scratch:
+            root = Path(scratch)
+            foreign = root / "allowed_signers"
+            foreign.write_bytes(pinned.read_bytes() + b"\n")
+            with self.assertRaisesRegex(
+                validator.ValidationError, "allowed-signers.*pin"
+            ):
+                validator.require_pinned_allowed_signers(foreign)
+            predicate = root / "should-not-exist.json"
+            args = [
+                "validator.py",
+                "--provenance", str(root / "not-yet-read-provenance.json"),
+                "--producer-receipt", str(root / "not-yet-read-receipt.json"),
+                "--producer-signature", str(root / "not-yet-read-signature.sig"),
+                "--allowed-signers", str(foreign),
+                "--recovery-contract", str(root / "not-yet-read-contract.json"),
+                "--authority-revision", AUTH_REV,
+                "--expected-heim-pc-revision", HEIM_REV,
+                "--write-predicate", str(predicate),
+            ]
+            with patch("sys.argv", args), patch.object(
+                validator, "load_json_bytes",
+                side_effect=AssertionError("untrusted receipt must not be read first"),
+            ):
+                with self.assertRaisesRegex(
+                    validator.ValidationError, "allowed-signers.*pin"
+                ):
+                    validator.main()
+            self.assertFalse(predicate.exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -484,3 +485,53 @@ def test_signed_json_strict_parser_retains_exact_bytes_and_nested_values(tmp_pat
         "facts": {"offline": True, "snapshot": "verified"},
         "schema_version": 1,
     }
+
+
+def test_production_allowed_signers_pin_is_exact_and_rejects_foreign_key(tmp_path):
+    """The audited production key must not be supplied by an arbitrary caller."""
+    pinned = ROOT / "keys" / "allowed_signers"
+    assert validator.require_pinned_allowed_signers(pinned) == (
+        "41ba9ae93d08b0d0a6ab037aa51ea4257cdcea6eedac310becee0c06832cc493"
+    )
+    foreign = tmp_path / "foreign-allowed-signers"
+    foreign.write_bytes(pinned.read_bytes() + b"\n")
+    with pytest.raises(validator.ValidationError, match="allowed-signers.*pin"):
+        validator.require_pinned_allowed_signers(foreign)
+
+
+def test_recovery_cli_denies_unpinned_signer_even_if_signature_verifies(monkeypatch, tmp_path):
+    """A valid signature from a caller-picked key is not a production signer."""
+    foreign = tmp_path / "foreign-allowed-signers"
+    foreign.write_bytes((ROOT / "keys" / "allowed_signers").read_bytes() + b"\n")
+    predicate = tmp_path / "predicate.json"
+    monkeypatch.setattr(sys, "argv", [
+        "validator.py",
+        "--provenance", str(tmp_path / "provenance.json"),
+        "--producer-receipt", str(tmp_path / "receipt.json"),
+        "--producer-signature", str(tmp_path / "receipt.sig"),
+        "--allowed-signers", str(foreign),
+        "--recovery-contract", str(tmp_path / "contract.json"),
+        "--authority-revision", AUTH_REV,
+        "--expected-heim-pc-revision", HEIM_REV,
+        "--write-predicate", str(predicate),
+    ])
+    seen = []
+    monkeypatch.setattr(
+        validator, "load_json_bytes",
+        lambda _path, label: ({"kind": "synthetic-base"}, label.encode()),
+    )
+    def forged_success(*args, **kwargs):
+        seen.append("signature_was_accepted")
+        return {"producer_signature_sha256": "1" * 64}
+    monkeypatch.setattr(validator, "verify_producer_signature", forged_success)
+    monkeypatch.setattr(validator, "validate_subject", lambda *a, **kw: {
+        "evidence_id": "off-host-home-restore",
+        "provenance_kind": "synthetic-base",
+        "source_revision": AUTH_REV,
+        "provenance_sha256": "2" * 64,
+        "producer_receipt_sha256": "3" * 64,
+    })
+    with pytest.raises(validator.ValidationError, match="allowed-signers.*pin"):
+        validator.main()
+    assert seen == []
+    assert not predicate.exists()
