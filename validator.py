@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -109,10 +110,17 @@ def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tupl
 
 def _read_bounded_evidence_file(path: Path, label: str) -> bytes:
     """Read bounded regular evidence once; consumers must not reopen its path."""
-    if path.is_symlink() or not path.is_file():
-        raise ValidationError(f"{label} requires a regular file")
     try:
-        with path.open("rb") as stream:
+        # Open exactly once: path.is_file() followed by Path.open() lets an
+        # attacker replace the source with a blocking FIFO between the calls.
+        # O_NONBLOCK makes even a FIFO swap fail promptly; fstat binds the
+        # regular-file check to the descriptor used for the bounded read.
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValidationError(f"{label} requires a regular file")
             exact = stream.read(64 * 1024 + 1)
     except OSError as exc:
         raise ValidationError(f"{label} is unreadable") from exc

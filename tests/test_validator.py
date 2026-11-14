@@ -551,6 +551,36 @@ def test_recovery_cli_denies_unpinned_signer_even_if_signature_verifies(monkeypa
     assert not predicate.exists()
 
 
+
+def test_signature_evidence_rejects_fifo_swap_before_open(monkeypatch, tmp_path):
+    """A path swapped to a FIFO must never hang signature verification."""
+    source = tmp_path / "signature.sig"
+    source.write_bytes(b"regular evidence")
+    original_open = validator.os.open
+    replaced = []
+
+    def swap_then_open(path, flags, *args, **kwargs):
+        if os.fspath(path) == os.fspath(source):
+            source.unlink()
+            os.mkfifo(source)
+            replaced.append(True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(validator.os, "open", swap_then_open)
+    with pytest.raises(validator.ValidationError, match="regular file"):
+        validator._read_bounded_evidence_file(source, "producer signature")
+    assert replaced == [True]
+
+
+def test_signature_evidence_rejects_symlink_and_reads_regular_file(tmp_path):
+    source = tmp_path / "signature.sig"
+    source.write_bytes(b"signature bytes")
+    assert validator._read_bounded_evidence_file(source, "producer signature") == b"signature bytes"
+    shortcut = tmp_path / "shortcut.sig"
+    shortcut.symlink_to(source)
+    with pytest.raises(validator.ValidationError, match="unreadable|regular file"):
+        validator._read_bounded_evidence_file(shortcut, "producer signature")
+
 def test_production_signature_rejects_attacker_signer_swap_after_pin(monkeypatch, tmp_path):
     """The verifier must use the exact pinned bytes, not reopen a mutable path."""
     env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
