@@ -501,6 +501,108 @@ def test_signed_json_strict_parser_retains_exact_bytes_and_nested_values(tmp_pat
     }
 
 
+@pytest.mark.parametrize("label", [
+    "provenance", "producer receipt", "base producer receipt", "recovery contract",
+])
+def test_signed_json_input_fifo_without_writer_rejected_promptly(tmp_path, label):
+    """Do not block on a forged FIFO before size and JSON validation."""
+    source = tmp_path / "untrusted-evidence.json"
+    os.mkfifo(source)
+    child = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import validator
+try:
+    validator.load_json_bytes(Path(sys.argv[2]), sys.argv[3])
+except validator.ValidationError:
+    print("DENIED")
+else:
+    raise SystemExit("UNSAFE_ACCEPT")
+"""
+    try:
+        done = subprocess.run(
+            [sys.executable, "-B", "-I", "-c", child, str(ROOT), str(source), label],
+            text=True, capture_output=True, check=False, timeout=3,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("signed JSON read blocked on a FIFO without a writer")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "DENIED"
+
+
+def test_signed_json_input_rejects_fifo_swapped_at_open(tmp_path):
+    """The regular-file check must apply to the opened FD, not the old path."""
+    source = tmp_path / "swappable-evidence.json"
+    source.write_bytes(b'{"safe":true}\n')
+    child = """
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import validator
+path = Path(sys.argv[2])
+real_open = validator.os.open
+def swap_before_open(file, flags, *args, **kwargs):
+    if os.fspath(file) == str(path):
+        path.unlink()
+        os.mkfifo(path)
+    return real_open(file, flags, *args, **kwargs)
+validator.os.open = swap_before_open
+try:
+    validator.load_json_bytes(path, "provenance")
+except validator.ValidationError:
+    print("DENIED")
+else:
+    raise SystemExit("UNSAFE_ACCEPT")
+"""
+    try:
+        done = subprocess.run(
+            [sys.executable, "-B", "-I", "-c", child, str(ROOT), str(source)],
+            text=True, capture_output=True, check=False, timeout=3,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("signed JSON read blocked after a FIFO swap")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "DENIED"
+
+
+@pytest.mark.parametrize("label", [
+    "provenance", "producer receipt", "base producer receipt", "recovery contract",
+])
+def test_signed_json_input_rejects_oversize_without_unbounded_read(
+    tmp_path, monkeypatch, label,
+):
+    source = tmp_path / "oversize-evidence.json"
+    with source.open("wb") as stream:
+        stream.truncate(16 * 1024 * 1024)
+
+    def disallow_unbounded_read(_self):
+        pytest.fail("unbounded Path.read_bytes must never read evidence")
+
+    monkeypatch.setattr(Path, "read_bytes", disallow_unbounded_read)
+    with pytest.raises(validator.ValidationError, match="size is outside"):
+        validator.load_json_bytes(source, label)
+
+
+def test_signed_json_input_preserves_exact_bytes_with_bounded_descriptor(
+    tmp_path, monkeypatch,
+):
+    source = tmp_path / "exact-bounded.json"
+    original = b'{"kind":"valid","count":1}\n'
+    source.write_bytes(original)
+
+    def disallow_unbounded_read(_self):
+        pytest.fail("unbounded Path.read_bytes must never read evidence")
+
+    monkeypatch.setattr(Path, "read_bytes", disallow_unbounded_read)
+    decoded, actual = validator.load_json_bytes(source, "provenance")
+    assert actual == original
+    assert decoded == {"kind": "valid", "count": 1}
+    with pytest.raises(validator.ValidationError, match="size contract"):
+        validator.load_json_bytes(source, "provenance", max_bytes=0)
+
+
 def test_production_allowed_signers_pin_is_exact_and_rejects_foreign_key(tmp_path):
     """The audited production key must not be supplied by an arbitrary caller."""
     pinned = ROOT / "keys" / "allowed_signers"

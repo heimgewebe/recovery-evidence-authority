@@ -91,9 +91,7 @@ def _finite_json_float(token: str) -> float:
 
 
 def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tuple[dict[str, Any], bytes]:
-    payload = path.read_bytes()
-    if not payload or len(payload) > max_bytes:
-        raise ValidationError(f"{label} size is outside the bounded contract")
+    payload = _read_bounded_evidence_file(path, label, max_bytes=max_bytes)
     try:
         value = json.loads(
             payload.decode("utf-8"),
@@ -108,8 +106,12 @@ def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tupl
     return value, payload
 
 
-def _read_bounded_evidence_file(path: Path, label: str) -> bytes:
+def _read_bounded_evidence_file(
+    path: Path, label: str, *, max_bytes: int = 64 * 1024
+) -> bytes:
     """Read bounded regular evidence once; consumers must not reopen its path."""
+    if type(max_bytes) is not int or not 1 <= max_bytes <= 256 * 1024:
+        raise ValidationError(f"{label} size contract is invalid")
     try:
         # Open exactly once: path.is_file() followed by Path.open() lets an
         # attacker replace the source with a blocking FIFO between the calls.
@@ -121,10 +123,10 @@ def _read_bounded_evidence_file(path: Path, label: str) -> bytes:
         with os.fdopen(descriptor, "rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise ValidationError(f"{label} requires a regular file")
-            exact = stream.read(64 * 1024 + 1)
+            exact = stream.read(max_bytes + 1)
     except OSError as exc:
         raise ValidationError(f"{label} is unreadable") from exc
-    if not exact or len(exact) > 64 * 1024:
+    if not exact or len(exact) > max_bytes:
         raise ValidationError(f"{label} size is outside the bounded contract")
     return exact
 
