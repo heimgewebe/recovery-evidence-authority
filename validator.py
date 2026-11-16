@@ -99,7 +99,9 @@ def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tupl
             parse_constant=_reject_non_json_constant,
             parse_float=_finite_json_float,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except ValidationError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise ValidationError(f"{label} is not valid UTF-8 JSON") from exc
     if not isinstance(value, dict):
         raise ValidationError(f"{label} must be a JSON object")

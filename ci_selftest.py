@@ -257,6 +257,22 @@ class SecuritySelfTest(unittest.TestCase):
                         validator.load_json_bytes(path, "producer receipt")
 
 
+    def test_signed_json_parser_limits_fail_closed(self):
+        cases = (
+            b'{"value":' + b"9" * 5000 + b"}",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "bounded-receipt.json"
+            for payload in cases:
+                with self.subTest(length=len(payload)):
+                    path.write_bytes(payload)
+                    with self.assertRaises(
+                        validator.ValidationError,
+                        msg="oversized integer or nesting must be a controlled denial",
+                    ):
+                        validator.load_json_bytes(path, "producer receipt")
+
+
     def test_real_sshsig_rejects_tampering_and_unpinned_signer(self):
         """Real OpenSSH primitive; ephemeral fixture key is NOT the heimberry key."""
         import subprocess
