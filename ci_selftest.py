@@ -273,6 +273,28 @@ class SecuritySelfTest(unittest.TestCase):
                         validator.load_json_bytes(path, "producer receipt")
 
 
+    def test_signed_json_integer_bound_survives_disabled_interpreter_limit(self):
+        import sys
+
+        previous = (
+            sys.get_int_max_str_digits()
+            if hasattr(sys, "get_int_max_str_digits") else None
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "integer-limit.json"
+            path.write_bytes(b'{"value":' + b"9" * 5000 + b"}")
+            try:
+                if previous is not None:
+                    sys.set_int_max_str_digits(0)
+                with self.assertRaisesRegex(
+                    validator.ValidationError, "integer.*digit"
+                ):
+                    validator.load_json_bytes(path, "producer receipt")
+            finally:
+                if previous is not None:
+                    sys.set_int_max_str_digits(previous)
+
+
     def test_real_sshsig_rejects_tampering_and_unpinned_signer(self):
         """Real OpenSSH primitive; ephemeral fixture key is NOT the heimberry key."""
         import subprocess

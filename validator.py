@@ -90,6 +90,14 @@ def _finite_json_float(token: str) -> float:
     return value
 
 
+def _bounded_json_integer(token: str) -> int:
+    # The interpreter's decimal-digit limit can be disabled by its environment.
+    # Signed evidence must have the same bound in every supported runtime.
+    if len(token) - token.startswith("-") > 4300:
+        raise ValidationError("signed JSON integer exceeds supported digit limit")
+    return int(token)
+
+
 def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tuple[dict[str, Any], bytes]:
     payload = _read_bounded_evidence_file(path, label, max_bytes=max_bytes)
     try:
@@ -98,6 +106,7 @@ def load_json_bytes(path: Path, label: str, max_bytes: int = 256 * 1024) -> tupl
             object_pairs_hook=_unambiguous_json_object,
             parse_constant=_reject_non_json_constant,
             parse_float=_finite_json_float,
+            parse_int=_bounded_json_integer,
         )
     except ValidationError:
         raise
