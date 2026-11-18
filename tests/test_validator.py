@@ -432,7 +432,7 @@ def test_producer_signature_verifier_uses_exact_receipt_bytes(monkeypatch, tmp_p
     result = validator.verify_producer_signature(receipt_bytes, signature, allowed)
     assert observed["input"] == receipt_bytes
     argv = observed["argv"]
-    assert argv[:4] == ["/usr/bin/ssh-keygen", "-Y", "verify", "-f"]
+    assert argv[:4] == [validator.SSH_KEYGEN, "-Y", "verify", "-f"]
     assert argv[5:10] == [
         "-I", "heimberry-recovery-producer",
         "-n", "heim-pc-recovery-evidence", "-s",

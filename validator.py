@@ -29,7 +29,12 @@ PROVENANCE_KINDS = {
 }
 RECEIPT_KIND = "heim_pc.external_recovery_producer_receipt.v1"
 ATTESTATION_KIND = "heim_pc.nixos_recovery_provenance_attestation"
-SSH_KEYGEN = "/usr/bin/ssh-keygen"
+# Resolve only root-managed absolute OpenSSH paths, never caller-controlled PATH.
+SSH_KEYGEN = (
+    "/usr/bin/ssh-keygen"
+    if Path("/usr/bin/ssh-keygen").is_file()
+    else "/run/current-system/sw/bin/ssh-keygen"
+)
 PRODUCER_SIGNER_IDENTITY = "heimberry-recovery-producer"
 PRODUCER_SIGNATURE_NAMESPACE = "heim-pc-recovery-evidence"
 # Independently pinned by ci_selftest.py; changing this digest is a trust-root rotation.
