@@ -24,6 +24,15 @@ jobs:
       - name: Run dependency-free security self-test
         run: python3 ci_selftest.py
 
+      # Run adversarial FIFO/TOCTOU/JSON cases, in addition to the
+      # dependency-free real-OpenSSH selftest above.
+      - name: Verify adversarial recovery validator regressions
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/recovery-pytest"
+          "$RUNNER_TEMP/recovery-pytest/bin/python" -m pip install --disable-pip-version-check --quiet "pytest==8.4.2"
+          "$RUNNER_TEMP/recovery-pytest/bin/python" -B -m pytest -p no:cacheprovider -q tests/test_validator.py
+
       - name: Assert recovery workflow wiring
         run: |
           set -euo pipefail
