@@ -409,10 +409,16 @@ class SecuritySelfTest(unittest.TestCase):
                     )
             self.assertEqual(swapped, [True])
 
+            # The fixture signer is intentionally unpinned. Permit that
+            # signer so a wrong namespace must fail in actual OpenSSH,
+            # rather than short-circuiting on the production signer pin.
             sign("unauthorized-recovery-domain")
-            with self.assertRaises(validator.ValidationError):
+            with self.assertRaisesRegex(
+                validator.ValidationError, "signature verification failed"
+            ):
                 validator.verify_producer_signature(
-                    receipt, signature, test_signers
+                    receipt, signature, test_signers,
+                    test_only_allow_unpinned_signers=True,
                 )
 
     def test_main_rejects_foreign_signer_even_before_receipt_parsing(self):
