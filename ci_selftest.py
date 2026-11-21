@@ -238,5 +238,226 @@ class SecuritySelfTest(unittest.TestCase):
             self.assertEqual(b"exact-receipt\n", observed["input"])
 
 
+    def test_signed_json_parser_rejects_duplicate_members_and_nonstandard_values(self):
+        cases = (
+            b'{"evidence":{"status":"passed","status":"denied"}}',
+            b'{"facts":{"offline":true,"offl\\u0069ne":false}}',
+            b'{"facts":{"time":NaN}}',
+            b'{"facts":{"time":1e309}}',
+            b'{"facts":{"time":-1.0E9999}}',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "signed-receipt.json"
+            for payload in cases:
+                with self.subTest(payload=payload):
+                    path.write_bytes(payload)
+                    with self.assertRaisesRegex(
+                        validator.ValidationError, "duplicate|non-standard|non-finite"
+                    ):
+                        validator.load_json_bytes(path, "producer receipt")
+
+
+    def test_signed_json_parser_limits_fail_closed(self):
+        cases = (
+            b'{"value":' + b"9" * 5000 + b"}",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "bounded-receipt.json"
+            for payload in cases:
+                with self.subTest(length=len(payload)):
+                    path.write_bytes(payload)
+                    with self.assertRaises(
+                        validator.ValidationError,
+                        msg="oversized integer or nesting must be a controlled denial",
+                    ):
+                        validator.load_json_bytes(path, "producer receipt")
+
+
+    def test_signed_json_integer_bound_survives_disabled_interpreter_limit(self):
+        import sys
+
+        previous = (
+            sys.get_int_max_str_digits()
+            if hasattr(sys, "get_int_max_str_digits") else None
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "integer-limit.json"
+            path.write_bytes(b'{"value":' + b"9" * 5000 + b"}")
+            try:
+                if previous is not None:
+                    sys.set_int_max_str_digits(0)
+                with self.assertRaisesRegex(
+                    validator.ValidationError, "integer.*digit"
+                ):
+                    validator.load_json_bytes(path, "producer receipt")
+            finally:
+                if previous is not None:
+                    sys.set_int_max_str_digits(previous)
+
+
+    def test_real_sshsig_rejects_tampering_and_unpinned_signer(self):
+        """Real OpenSSH primitive; ephemeral fixture key is NOT the heimberry key."""
+        import subprocess
+
+        receipt = b'{"kind":"synthetic-unsigned-recovery-fixture","result":"passed"}\n'
+        env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+        with tempfile.TemporaryDirectory(prefix="recovery-sshsig-ci-") as scratch:
+            root = Path(scratch)
+            private_key = root / "ephemeral-test-only"
+            signature = root / "receipt.sig"
+            test_signers = root / "test-allowed-signers"
+            fake_signers = root / "incorrect-principal"
+            subprocess.run(
+                [
+                    validator.SSH_KEYGEN, "-q", "-t", "ed25519",
+                    "-N", "", "-f", str(private_key),
+                ],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=15, env=env,
+            )
+            public_key = private_key.with_suffix(".pub").read_text(
+                encoding="ascii"
+            ).strip()
+            test_signers.write_text(
+                validator.PRODUCER_SIGNER_IDENTITY + " " + public_key + "\n",
+                encoding="ascii",
+            )
+            fake_signers.write_text(
+                "unapproved-recovery-producer " + public_key + "\n",
+                encoding="ascii",
+            )
+
+            def sign(namespace):
+                completed = subprocess.run(
+                    [
+                        validator.SSH_KEYGEN, "-Y", "sign", "-f",
+                        str(private_key), "-n", namespace,
+                    ],
+                    input=receipt, check=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, timeout=15, env=env,
+                )
+                signature.write_bytes(completed.stdout)
+                self.assertTrue(
+                    completed.stdout.startswith(b"-----BEGIN SSH SIGNATURE-----")
+                )
+
+            sign(validator.PRODUCER_SIGNATURE_NAMESPACE)
+            observed = validator.verify_producer_signature(
+                receipt, signature, test_signers,
+                test_only_allow_unpinned_signers=True,
+            )
+            self.assertEqual(
+                hashlib.sha256(signature.read_bytes()).hexdigest(),
+                observed["producer_signature_sha256"],
+            )
+            with self.assertRaisesRegex(
+                validator.ValidationError, "signature verification failed"
+            ):
+                validator.verify_producer_signature(
+                    receipt.replace(b'"passed"', b'"denied"'),
+                    signature, test_signers,
+                    test_only_allow_unpinned_signers=True,
+                )
+            with self.assertRaises(validator.ValidationError):
+                validator.verify_producer_signature(
+                    receipt + b" ", signature, test_signers,
+                    test_only_allow_unpinned_signers=True,
+                )
+            with self.assertRaises(validator.ValidationError):
+                validator.verify_producer_signature(
+                    receipt, signature, fake_signers,
+                    test_only_allow_unpinned_signers=True,
+                )
+
+            pinned = Path(__file__).resolve().parent / "keys" / "allowed_signers"
+            # Independent, reviewed production PUBLIC-key anchor. A missing,
+            # truncated or rotated key must fail the CI gate *before* we
+            # interpret the ephemeral-signature mismatch as successful denial.
+            # Key rotation requires an explicit reviewed update of this hash.
+            self.assertEqual(
+                hashlib.sha256(pinned.read_bytes()).hexdigest(),
+                "41ba9ae93d08b0d0a6ab037aa51ea4257cdcea6eedac310becee0c06832cc493",
+                "production allowed-signers public key identity drifted",
+            )
+            with self.assertRaisesRegex(
+                validator.ValidationError, "signature verification failed"
+            ):
+                validator.verify_producer_signature(receipt, signature, pinned)
+
+            # Real adversarial signer-path replacement between hash and child
+            # verification: only sealed, originally pinned bytes may be used.
+            sign(validator.PRODUCER_SIGNATURE_NAMESPACE)
+            mutable_signers = root / "caller-controlled-signers"
+            mutable_signers.write_bytes(pinned.read_bytes())
+            actual_run = validator.subprocess.run
+            swapped = []
+
+            def swap_during_verify(argv, **kwargs):
+                if argv[:3] == [validator.SSH_KEYGEN, "-Y", "verify"]:
+                    mutable_signers.write_bytes(test_signers.read_bytes())
+                    swapped.append(True)
+                return actual_run(argv, **kwargs)
+
+            with patch.object(
+                validator.subprocess, "run", side_effect=swap_during_verify,
+            ):
+                with self.assertRaisesRegex(
+                    validator.ValidationError, "signature verification failed"
+                ):
+                    validator.verify_producer_signature(
+                        receipt, signature, mutable_signers,
+                    )
+            self.assertEqual(swapped, [True])
+
+            # The fixture signer is intentionally unpinned. Permit that
+            # signer so a wrong namespace must fail in actual OpenSSH,
+            # rather than short-circuiting on the production signer pin.
+            sign("unauthorized-recovery-domain")
+            with self.assertRaisesRegex(
+                validator.ValidationError, "signature verification failed"
+            ):
+                validator.verify_producer_signature(
+                    receipt, signature, test_signers,
+                    test_only_allow_unpinned_signers=True,
+                )
+
+    def test_main_rejects_foreign_signer_even_before_receipt_parsing(self):
+        """CI must fail when a plausible caller replaces the trusted signers."""
+        pinned = Path(__file__).resolve().parent / "keys" / "allowed_signers"
+        self.assertEqual(
+            validator.require_pinned_allowed_signers(pinned),
+            "41ba9ae93d08b0d0a6ab037aa51ea4257cdcea6eedac310becee0c06832cc493",
+        )
+        with tempfile.TemporaryDirectory(prefix="recovery-foreign-signer-") as scratch:
+            root = Path(scratch)
+            foreign = root / "allowed_signers"
+            foreign.write_bytes(pinned.read_bytes() + b"\n")
+            with self.assertRaisesRegex(
+                validator.ValidationError, "allowed-signers.*pin"
+            ):
+                validator.require_pinned_allowed_signers(foreign)
+            predicate = root / "should-not-exist.json"
+            args = [
+                "validator.py",
+                "--provenance", str(root / "not-yet-read-provenance.json"),
+                "--producer-receipt", str(root / "not-yet-read-receipt.json"),
+                "--producer-signature", str(root / "not-yet-read-signature.sig"),
+                "--allowed-signers", str(foreign),
+                "--recovery-contract", str(root / "not-yet-read-contract.json"),
+                "--authority-revision", AUTH_REV,
+                "--expected-heim-pc-revision", HEIM_REV,
+                "--write-predicate", str(predicate),
+            ]
+            with patch("sys.argv", args), patch.object(
+                validator, "load_json_bytes",
+                side_effect=AssertionError("untrusted receipt must not be read first"),
+            ):
+                with self.assertRaisesRegex(
+                    validator.ValidationError, "allowed-signers.*pin"
+                ):
+                    validator.main()
+            self.assertFalse(predicate.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
